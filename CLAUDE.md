@@ -1,56 +1,105 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
 
 ## Commands
 
 ```bash
-npm run dev          # Start development server (http://localhost:3000)
-npm run build        # Production build
-npm run lint         # ESLint
-npm run type-check   # TypeScript check without emitting
+npm run dev          # Start dev server (http://localhost:3000/nanny/)
+npm run build        # TypeScript check + Vite production build
+npm run deploy       # Build + push to GitHub Pages (gh-pages branch)
 ```
 
-> Note: `next.config.ts` is not supported by Next.js 14 — use `next.config.mjs`.
+Live URL: **https://eyalsharon.github.io/nanny/**
+
+## Feature Development Workflow
+
+Every new feature is built in a separate git worktree so `main` stays deployable.
+
+```bash
+# Start a new feature
+git worktree add ../nanny-<feature> -b feature/<feature>
+
+# Work in the worktree (separate directory, same repo)
+cd ../nanny-<feature>
+npm install   # only needed if package.json changed
+npm run dev
+
+# When done, merge back to main
+cd ../nanny
+git merge feature/<feature>
+git worktree remove ../nanny-<feature>
+git branch -d feature/<feature>
+
+# Deploy
+npm run deploy
+```
+
+Active worktrees: none yet.
 
 ## Architecture
 
-**Next.js 14 App Router** with two pages: `/` (Dashboard) and `/expenses` (Expense Manager).
+**React + Vite SPA** deployed as a **PWA** (installable on iOS/Android via Safari → Add to Home Screen).
 
-All data is stored in `localStorage` via `lib/storage.ts`. There is no backend or API layer.
+All data lives in `localStorage` — no backend, no API. Data version is tracked in `storage.ts` (`VERSION` constant); bump it on any breaking model change to auto-wipe stale data.
 
-### State Management
+### Auth
 
-A single custom hook `hooks/useExpenses.ts` owns all expense state. It loads from localStorage on mount, persists on every change, and exposes CRUD operations plus filtered/computed results. Both pages consume this hook directly — there is no global context or state library.
+Username + PIN login. Role is inferred:
+- Matches `parentAccounts[]` → Parent (full access)
+- Matches `workers[].username` → Worker (own data only)
 
-### Data Flow
-
-```
-localStorage → useExpenses hook → page component → child components
-                    ↑
-            addExpense / updateExpense / deleteExpense
-```
+Default credentials: `eyal` / `1234` (parent), `lisa` / `0000` (nanny)
 
 ### Key Files
 
 | File | Purpose |
 |---|---|
-| `hooks/useExpenses.ts` | All state, CRUD, filtering, memoized stats |
-| `lib/types.ts` | `Expense`, `ExpenseFilters`, `SummaryStats` types |
-| `lib/utils.ts` | `filterExpenses`, `computeStats`, `getSpendingByDay`, `exportToCSV`, `formatCurrency` |
-| `lib/categories.ts` | Category list + color/icon maps |
-| `components/expenses/ExpenseList.tsx` | Full expenses page (filters, list, modals) |
-| `components/dashboard/SpendingChart.tsx` | Recharts AreaChart — must be `dynamic` (no SSR) |
-| `components/dashboard/CategoryBreakdown.tsx` | Recharts PieChart — must be `dynamic` (no SSR) |
+| `src/types.ts` | All TypeScript types (`Worker`, `WorkEntry`, `Payment`, `ParentAccount`, `Session`) |
+| `src/lib/storage.ts` | `loadData` / `saveData` + seed data + version migration |
+| `src/lib/utils.ts` | `computeHours`, `computeGross`, `formatCurrency`, `exportToCSV` |
+| `src/hooks/useAppData.ts` | All state, CRUD, `checkLogin`, `balanceForWorker` |
+| `src/context/AppContext.tsx` | React context wrapping `useAppData` + session management |
+| `src/components/Layout.tsx` | Sidebar (desktop) + bottom nav (mobile) + FAB for workers |
+| `src/components/ui.tsx` | Shared UI primitives: `Card`, `Button`, `Input`, `Select`, `Badge`, etc. |
+| `src/pages/CalendarPage.tsx` | **Home page** — monthly calendar, colored day chips, payment actions |
+| `src/pages/DashboardPage.tsx` | Parent-only stats + Recharts bar charts |
 
-### Recharts / SSR
+### Data Model (brief)
 
-Chart components use Recharts which requires browser APIs. They are imported with `next/dynamic` and `{ ssr: false }` in `app/page.tsx`. Never import them directly in server components.
+```
+ParentAccount  { id, name, username, pin }
+Worker         { id, username, pin, name, doesCare, doesCleaning,
+                 careRate, cleaningRate, nightRate, overtimeMultiplier, ... }
+WorkEntry      { id, workerId, date, startTime, endTime,
+                 workType ('baby_care'|'cleaning'), shiftType ('day'|'night'),
+                 hoursWorked, grossAmount, createdBy }
+Payment        { id, workerId, date, amount, method, periodStart, periodEnd,
+                 notes?, imageDataUrl? }
+```
 
-### Form Validation
+### Pay Calculation
 
-`ExpenseForm.tsx` uses `react-hook-form` + `zod`. The schema is defined inline in the component file.
+```
+dayRate  = workType === 'cleaning' ? worker.cleaningRate : worker.careRate
+rate     = shiftType === 'night'   ? worker.nightRate    : dayRate
+gross    = min(hours, 8) × rate  +  max(hours − 8, 0) × rate × overtimeMultiplier
+```
 
-### Routing / Layout
+### Calendar Color Logic
 
-`app/layout.tsx` renders `<Sidebar>` (fixed, `w-60` on desktop, bottom nav on mobile) and `<Header>`. Main content has `md:ml-60` to account for the sidebar. Mobile adds `pb-24` to avoid the bottom nav overlap.
+A worked day chip is **green** if any payment for that worker has `periodStart ≤ date ≤ periodEnd`, otherwise **amber**.
+
+### Routing
+
+| Route | Access | Page |
+|---|---|---|
+| `/login` | Public | Login |
+| `/` | Both | Calendar (home) |
+| `/dashboard` | Parent | Dashboard + charts |
+| `/hours` | Both | Work entry list |
+| `/hours/new` | Both | Log / edit hours |
+| `/workers` | Parent | Worker list |
+| `/workers/:id` | Both | Worker detail + history |
+| `/payments` | Parent | Payments (supports `?workerId&periodStart&periodEnd` prefill from calendar) |
+| `/settings` | Parent | Parent accounts, CSV export |
